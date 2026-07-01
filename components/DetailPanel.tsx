@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { scaleLinear, scaleTime } from "d3-scale";
 import { extent, max } from "d3-array";
+import { X } from "lucide-react";
 import type { CityWeather } from "@/app/api/weather/route";
 import type { HourlyForecast } from "@/app/api/forecast/[id]/route";
 import { describeWeather } from "@/lib/weatherCodes";
@@ -94,16 +95,17 @@ export default function DetailPanel({
           <div className="text-lg font-semibold text-slate-100">
             {city.name}, {city.country}
           </div>
-          <div className="text-sm text-slate-400">
-            {weather.emoji} {weather.label}
+          <div className="flex items-center gap-1.5 text-sm text-slate-400">
+            <weather.icon size={14} />
+            {weather.label}
           </div>
         </div>
         <button
           onClick={onClose}
           aria-label="Close detail panel"
-          className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800 transition-colors"
+          className="flex h-7 w-7 items-center justify-center rounded-full border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors"
         >
-          ✕
+          <X size={14} />
         </button>
       </div>
 
@@ -117,12 +119,17 @@ export default function DetailPanel({
         <span>Precipitation</span>
         <span className="text-right text-slate-100">{city.precipitation.toFixed(1)} mm</span>
         <span>Air quality</span>
-        <span className="text-right text-slate-100">
+        <span className="flex items-center justify-end gap-1.5 text-right text-slate-100">
           {Number.isNaN(city.aqi) ? (
             "—"
           ) : (
             <>
-              {city.aqi.toFixed(0)} · {describeAqi(city.aqi).emoji} {describeAqi(city.aqi).label}
+              {city.aqi.toFixed(0)} ·
+              <span
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ background: describeAqi(city.aqi).color }}
+              />
+              {describeAqi(city.aqi).label}
             </>
           )}
         </span>

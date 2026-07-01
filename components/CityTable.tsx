@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { ChevronUp, ChevronDown } from "lucide-react";
 import type { CityWeather } from "@/app/api/weather/route";
 import { describeWeather } from "@/lib/weatherCodes";
 import { describeAqi } from "@/lib/airQuality";
@@ -64,7 +65,12 @@ export default function CityTable({
                   className="flex items-center gap-1 hover:text-slate-100 transition-colors"
                 >
                   {col.label}
-                  {sortKey === col.key && <span className="text-slate-500">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                  {sortKey === col.key &&
+                    (sortDir === "asc" ? (
+                      <ChevronUp size={12} className="text-slate-500" />
+                    ) : (
+                      <ChevronDown size={12} className="text-slate-500" />
+                    ))}
                 </button>
               </th>
             ))}
@@ -95,16 +101,21 @@ export default function CityTable({
                   {Number.isNaN(city.aqi) ? (
                     "—"
                   ) : (
-                    <>
-                      {city.aqi.toFixed(0)}{" "}
-                      <span className="text-slate-400">
-                        {describeAqi(city.aqi).emoji} {describeAqi(city.aqi).label}
-                      </span>
-                    </>
+                    <span className="flex items-center gap-1.5">
+                      {city.aqi.toFixed(0)}
+                      <span
+                        className="inline-block h-2 w-2 rounded-full"
+                        style={{ background: describeAqi(city.aqi).color }}
+                      />
+                      <span className="text-slate-400">{describeAqi(city.aqi).label}</span>
+                    </span>
                   )}
                 </td>
                 <td className="px-3 py-2 text-slate-200">
-                  {weather.emoji} <span className="text-slate-400">{weather.label}</span>
+                  <span className="flex items-center gap-1.5">
+                    <weather.icon size={13} />
+                    <span className="text-slate-400">{weather.label}</span>
+                  </span>
                 </td>
               </tr>
             );

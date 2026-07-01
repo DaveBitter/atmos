@@ -1,5 +1,7 @@
 # Atmos 🌍
 
+*Check in on earth once in a while.*
+
 A live, playful weather visualization of ~30 cities around the world, full-bleed
 across the screen. Each city is an orb on a D3-rendered world map, and the color
 it's shaded by is switchable:

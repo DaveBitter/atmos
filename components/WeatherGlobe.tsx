@@ -9,6 +9,7 @@ import { select } from "d3-selection";
 import "d3-transition";
 import { feature } from "topojson-client";
 import type { Topology, GeometryCollection } from "topojson-specification";
+import { Globe, Flame, Snowflake, Activity, ZoomIn, ZoomOut, RotateCcw, RefreshCw } from "lucide-react";
 import type { CityWeather } from "@/app/api/weather/route";
 import type { Earthquake } from "@/app/api/earthquakes/route";
 import { describeWeather } from "@/lib/weatherCodes";
@@ -420,9 +421,15 @@ export default function WeatherGlobe() {
                           <line x1={2} y1={radius + 4} x2={2} y2={radius + 8} stroke="#38bdf8" strokeWidth={1} />
                         </g>
                       )}
-                      <text textAnchor="middle" y={-radius - 6} fontSize={9} fill="#cbd5e1" opacity={0.85}>
-                        {weather.emoji}
-                      </text>
+                      <weather.icon
+                        x={-5}
+                        y={-radius - 11}
+                        width={10}
+                        height={10}
+                        color={color}
+                        strokeWidth={2.25}
+                        opacity={0.9}
+                      />
                     </g>
                   </g>
                 );
@@ -439,8 +446,12 @@ export default function WeatherGlobe() {
             <div className="font-semibold">
               {hovered.name}, {hovered.country}
             </div>
-            <div className="text-slate-300">
-              {describeWeather(hovered.weatherCode).emoji} {describeWeather(hovered.weatherCode).label}
+            <div className="flex items-center gap-1.5 text-slate-300">
+              {(() => {
+                const WeatherIcon = describeWeather(hovered.weatherCode).icon;
+                return <WeatherIcon size={13} />;
+              })()}
+              {describeWeather(hovered.weatherCode).label}
             </div>
             <div className="mt-1 grid grid-cols-2 gap-x-2 text-slate-400">
               <span>Temp</span>
@@ -487,16 +498,19 @@ export default function WeatherGlobe() {
       {/* Top overlay bar: title/stats on the left, controls on the right. */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-40 flex flex-col gap-2 p-4 md:flex-row md:items-start md:justify-between">
         <div className="pointer-events-auto max-w-md rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-3 backdrop-blur">
-          <h1 className="text-lg font-semibold tracking-tight text-slate-100">
-            🌍 Atmos — a live pulse of the planet
+          <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-slate-100">
+            <Globe size={20} className="text-sky-400" />
+            Atmos — check in on earth once in a while
           </h1>
           <div className="mt-1 text-xs text-slate-400">
             {stats ? (
-              <span>
-                🔥 {stats.warmest.name} {stats.warmest.temperature.toFixed(1)}°C
-                {"  ·  "}
-                🧊 {stats.coldest.name} {stats.coldest.temperature.toFixed(1)}°C
-                {"  ·  "}
+              <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                <Flame size={12} className="text-orange-400" />
+                {stats.warmest.name} {stats.warmest.temperature.toFixed(1)}°C
+                <span className="text-slate-600">·</span>
+                <Snowflake size={12} className="text-sky-400" />
+                {stats.coldest.name} {stats.coldest.temperature.toFixed(1)}°C
+                <span className="text-slate-600">·</span>
                 Avg {stats.avg.toFixed(1)}°C
               </span>
             ) : (
@@ -507,8 +521,9 @@ export default function WeatherGlobe() {
             {data && <span>Updated {new Date(data.fetchedAt).toLocaleTimeString()}</span>}
             <button
               onClick={loadWeather}
-              className="pointer-events-auto rounded-full border border-slate-600 px-2 py-0.5 text-slate-200 hover:bg-slate-800 transition-colors"
+              className="pointer-events-auto flex items-center gap-1 rounded-full border border-slate-600 px-2 py-0.5 text-slate-200 hover:bg-slate-800 transition-colors"
             >
+              <RefreshCw size={10} />
               Refresh
             </button>
           </div>
@@ -554,13 +569,14 @@ export default function WeatherGlobe() {
           <button
             onClick={() => setShowQuakes((v) => !v)}
             title={quakesError ? `Couldn't load earthquakes: ${quakesError}` : undefined}
-            className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+            className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors ${
               showQuakes
                 ? "border-amber-600/60 bg-amber-500/20 text-amber-200"
                 : "border-slate-700 text-slate-300 hover:bg-slate-800"
             }`}
           >
-            🌎 Quakes{quakes ? ` (${quakes.quakes.length})` : ""}
+            <Activity size={13} />
+            Quakes{quakes ? ` (${quakes.quakes.length})` : ""}
           </button>
         </div>
       </div>
@@ -579,23 +595,23 @@ export default function WeatherGlobe() {
             <button
               onClick={() => zoomBy(1.5)}
               aria-label="Zoom in"
-              className="h-7 w-7 rounded-md border border-slate-700 bg-slate-900/90 text-sm text-slate-200 hover:bg-slate-800"
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-900/90 text-slate-200 hover:bg-slate-800"
             >
-              +
+              <ZoomIn size={14} />
             </button>
             <button
               onClick={() => zoomBy(1 / 1.5)}
               aria-label="Zoom out"
-              className="h-7 w-7 rounded-md border border-slate-700 bg-slate-900/90 text-sm text-slate-200 hover:bg-slate-800"
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-900/90 text-slate-200 hover:bg-slate-800"
             >
-              −
+              <ZoomOut size={14} />
             </button>
             <button
               onClick={resetZoom}
               aria-label="Reset zoom"
-              className="h-7 w-7 rounded-md border border-slate-700 bg-slate-900/90 text-[10px] text-slate-200 hover:bg-slate-800"
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-900/90 text-slate-200 hover:bg-slate-800"
             >
-              ⟲
+              <RotateCcw size={12} />
             </button>
           </div>
 
@@ -618,7 +634,10 @@ export default function WeatherGlobe() {
 
             {showQuakes && (
               <div className="rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-2 text-[10px] text-slate-300">
-                <div className="mb-1">🌎 M4.5+ earthquakes (24h)</div>
+                <div className="mb-1 flex items-center gap-1.5">
+                  <Activity size={11} />
+                  M4.5+ earthquakes (24h)
+                </div>
                 <div className="flex items-center gap-2">
                   <span className="flex items-center gap-1">
                     <span className="inline-block h-2 w-2 rounded-full" style={{ background: quakeColor(4.5) }} />
