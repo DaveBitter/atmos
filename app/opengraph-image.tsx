@@ -71,6 +71,9 @@ export default async function OgImage() {
         <div style={{ display: "flex", fontSize: 34, color: "#cbd5e1", marginTop: 20, textAlign: "center" }}>
           Check in on earth once in a while
         </div>
+        <div style={{ display: "flex", fontSize: 22, color: "#64748b", marginTop: 14 }}>
+          Weather · Air quality · Earthquakes · Time travel to 1940
+        </div>
 
         {warmest && coldest && (
           <div style={{ display: "flex", marginTop: 48, fontSize: 26, color: "#94a3b8" }}>

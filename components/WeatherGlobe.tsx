@@ -9,10 +9,49 @@ import { select } from "d3-selection";
 import "d3-transition";
 import { feature } from "topojson-client";
 import type { Topology, GeometryCollection } from "topojson-specification";
-import { Globe, Flame, Snowflake, Activity, ZoomIn, ZoomOut, RotateCcw, RefreshCw } from "lucide-react";
+import {
+  Globe,
+  Flame,
+  Snowflake,
+  Activity,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+  RefreshCw,
+  Play,
+  Pause,
+  History,
+  Thermometer,
+  Tornado,
+} from "lucide-react";
 import type { CityWeather } from "@/app/api/weather/route";
 import type { Earthquake } from "@/app/api/earthquakes/route";
+import type { Hurricane } from "@/app/api/hurricanes/route";
+import type { DailySnapshot } from "@/app/api/history/route";
+import { CITIES } from "@/lib/cities";
 import { describeWeather } from "@/lib/weatherCodes";
+import {
+  estimateIsDay,
+  findNearestHourIndex,
+  formatScrubTime,
+  formatAbsoluteDateTime,
+  formatRelativeTime,
+  formatMonthYear,
+  formatWeekday,
+  formatTimeOnly,
+} from "@/lib/time";
+import {
+  type UnitSystem,
+  formatTemperature,
+  formatWind,
+  formatPrecip,
+  formatDistance,
+  formatWindFromMph,
+  temperatureUnitLabel,
+  windUnitLabel,
+  precipUnitLabel,
+  convertMetricValue,
+} from "@/lib/units";
 import DetailPanel from "@/components/DetailPanel";
 import CityTable from "@/components/CityTable";
 
@@ -26,6 +65,15 @@ type EarthquakeResponse = {
   quakes: Earthquake[];
 };
 
+type HurricaneResponse = {
+  fetchedAt: string;
+  storms: Hurricane[];
+};
+
+function isRateLimited(msg: string | null) {
+  return !!msg && /429|rate.?limit/i.test(msg);
+}
+
 function quakeColor(mag: number) {
   if (mag >= 7) return "#dc2626"; // red-600
   if (mag >= 6) return "#f97316"; // orange-500
@@ -33,13 +81,26 @@ function quakeColor(mag: number) {
   return "#facc15"; // yellow-400
 }
 
-function timeAgo(iso: string) {
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const minutes = Math.round(diffMs / 60000);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+// Roughly Saffir-Simpson-coded: gray for depressions, cyan for (sub)tropical
+// storms, escalating yellow -> purple through hurricane categories 1-5.
+function hurricaneColor(classification: string, category: number | null) {
+  if (classification === "HU" || classification === "TY") {
+    switch (category) {
+      case 5:
+        return "#a21caf"; // fuchsia-700
+      case 4:
+        return "#c026d3"; // fuchsia-600
+      case 3:
+        return "#dc2626"; // red-600
+      case 2:
+        return "#f97316"; // orange-500
+      default:
+        return "#f59e0b"; // amber-500 (cat 1 or unknown)
+    }
+  }
+  if (classification === "TS" || classification === "STS") return "#22d3ee"; // cyan-400
+  if (classification === "PTC") return "#94a3b8"; // slate-400
+  return "#64748b"; // TD / STD / PC — slate-500
 }
 
 type Metric = "temperature" | "windSpeed" | "precipitation" | "airQuality";
@@ -53,7 +114,10 @@ const METRICS: Record<
   Metric,
   {
     label: string;
-    unit: string;
+    unit: (units: UnitSystem) => string;
+    // Metric key for lib/units' convertMetricValue, or null if the metric
+    // has no imperial equivalent (e.g. AQI).
+    unitsMetric: "temperature" | "windSpeed" | "precipitation" | null;
     access: (c: CityWeather) => number;
     interpolator: (t: number) => string;
     reverse: boolean;
@@ -63,7 +127,8 @@ const METRICS: Record<
 > = {
   temperature: {
     label: "Temperature",
-    unit: "°C",
+    unit: temperatureUnitLabel,
+    unitsMetric: "temperature",
     access: (c) => c.temperature,
     interpolator: interpolateRdYlBu,
     reverse: true, // red = hot, blue = cold
@@ -72,7 +137,8 @@ const METRICS: Record<
   },
   windSpeed: {
     label: "Wind speed",
-    unit: "km/h",
+    unit: windUnitLabel,
+    unitsMetric: "windSpeed",
     access: (c) => c.windSpeed,
     interpolator: interpolateBuPu,
     reverse: false,
@@ -81,7 +147,8 @@ const METRICS: Record<
   },
   precipitation: {
     label: "Precipitation",
-    unit: "mm",
+    unit: precipUnitLabel,
+    unitsMetric: "precipitation",
     access: (c) => c.precipitation,
     interpolator: interpolateBlues,
     reverse: false,
@@ -90,7 +157,8 @@ const METRICS: Record<
   },
   airQuality: {
     label: "Air quality",
-    unit: "US AQI",
+    unit: () => "US AQI",
+    unitsMetric: null,
     access: (c) => c.aqi,
     interpolator: interpolateRdYlGn,
     reverse: true, // green = clean air, red = poor air (low AQI is good)
@@ -143,6 +211,29 @@ function pulseDuration(windSpeed: number) {
 
 const IDENTITY_TRANSFORM = { x: 0, y: 0, k: 1 };
 
+const HISTORY_START_YEAR = 1940; // Open-Meteo's ERA5 archive begins here.
+
+type MonthlyEntry = { date: string }; // YYYY-MM-01, UTC
+
+// One entry per month from 1940-01 up to (but not including) the month the
+// recent hourly window starts in — the "deep history, lower resolution"
+// half of the combined timeline.
+function buildMonthlyEntries(hourlyStartIso: string | undefined): MonthlyEntry[] {
+  if (!hourlyStartIso) return [];
+  const hourlyStart = new Date(hourlyStartIso);
+  const stopYear = hourlyStart.getUTCFullYear();
+  const stopMonth = hourlyStart.getUTCMonth();
+
+  const entries: MonthlyEntry[] = [];
+  for (let y = HISTORY_START_YEAR; y <= stopYear; y++) {
+    const lastMonth = y === stopYear ? stopMonth - 1 : 11;
+    for (let m = 0; m <= lastMonth; m++) {
+      entries.push({ date: `${y}-${String(m + 1).padStart(2, "0")}-01` });
+    }
+  }
+  return entries;
+}
+
 export default function WeatherGlobe() {
   const { landPath, projection } = useLandPaths();
   const [data, setData] = useState<WeatherResponse | null>(null);
@@ -150,6 +241,7 @@ export default function WeatherGlobe() {
   const [hovered, setHovered] = useState<CityWeather | null>(null);
   const [mouse, setMouse] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [metric, setMetric] = useState<Metric>("temperature");
+  const [units, setUnits] = useState<UnitSystem>("metric");
   const [view, setView] = useState<View>("map");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -158,10 +250,46 @@ export default function WeatherGlobe() {
   const [quakesError, setQuakesError] = useState<string | null>(null);
   const [showQuakes, setShowQuakes] = useState(true);
   const [hoveredQuake, setHoveredQuake] = useState<Earthquake | null>(null);
+  // Active storms are live-only — NHC's free feed has no historical/by-date
+  // query, unlike the USGS earthquake feed — so this only ever shows what's
+  // active right now, regardless of where the scrubber is.
+  const [hurricanes, setHurricanes] = useState<HurricaneResponse | null>(null);
+  const [hurricanesError, setHurricanesError] = useState<string | null>(null);
+  const [showHurricanes, setShowHurricanes] = useState(true);
+  const [hoveredHurricane, setHoveredHurricane] = useState<Hurricane | null>(null);
+  // scrubIndex is null when following live data, otherwise an index into the
+  // COMBINED timeline: monthly deep-history entries (1940 -> just before the
+  // recent window) followed by hourly entries (past 48h -> next 24h). One
+  // slider, one index space, two resolutions.
+  const [scrubIndex, setScrubIndex] = useState<number | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [liveIndex, setLiveIndex] = useState(-1); // index within the hourly-only window
+  const [historySnapshots, setHistorySnapshots] = useState<DailySnapshot[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  // Last non-empty effectiveCities snapshot — used as a stale-while-loading
+  // fallback so the map never goes blank mid-scrub (see effectiveCities below).
+  // State rather than a ref, since refs can't be read during render.
+  const [lastGoodCities, setLastGoodCities] = useState<CityWeather[]>([]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const zoomBehaviorRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+  const historyCacheRef = useRef<Map<string, DailySnapshot[]>>(new Map());
+
+  // Restore the user's unit preference (localStorage isn't available during
+  // SSR, so this only runs client-side, after the initial "metric" render).
+  useEffect(() => {
+    const stored = window.localStorage.getItem("atmos:units");
+    if (stored === "metric" || stored === "imperial") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setUnits(stored);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("atmos:units", units);
+  }, [units]);
 
   const loadWeather = useCallback(async () => {
     try {
@@ -170,6 +298,10 @@ export default function WeatherGlobe() {
       if (!res.ok) throw new Error(json.detail ?? json.error ?? "Unknown error");
       setData(json);
       setError(null);
+      // Date.now() is impure, so it can't live in render (e.g. a useMemo) —
+      // computing it here, in the fetch's async continuation, keeps render pure.
+      const tl: WeatherResponse["cities"][number]["hourly"] = json.cities?.[0]?.hourly ?? [];
+      setLiveIndex(tl.length > 0 ? findNearestHourIndex(tl, Date.now()) : -1);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -184,9 +316,31 @@ export default function WeatherGlobe() {
     return () => clearInterval(interval);
   }, [loadWeather]);
 
+  // One combined timeline: monthly deep-history (1940 -> just before the
+  // recent window) followed by the hourly window (past 48h -> next 24h).
+  // A single index space drives the slider, whichever resolution it lands in.
+  const timeline = useMemo(() => data?.cities[0]?.hourly ?? [], [data]);
+  const monthlyEntries = useMemo(() => buildMonthlyEntries(timeline[0]?.time), [timeline]);
+  const combinedLength = monthlyEntries.length + timeline.length;
+
+  const isLive = scrubIndex === null;
+  const liveIndexCombined = liveIndex >= 0 ? monthlyEntries.length + liveIndex : -1;
+  const activeIndex = scrubIndex ?? liveIndexCombined;
+  const activeZone: "monthly" | "hourly" = activeIndex < monthlyEntries.length ? "monthly" : "hourly";
+
+  // The calendar date the scrubber is currently sitting on (null while live)
+  // — this is what both the historical-weather fetch and the historical-quake
+  // fetch key off, regardless of which zone/resolution it came from.
+  const activeDate: string | null = isLive || activeIndex < 0
+    ? null
+    : activeZone === "monthly"
+      ? monthlyEntries[activeIndex]?.date ?? null
+      : timeline[activeIndex - monthlyEntries.length]?.time.slice(0, 10) ?? null;
+
   const loadQuakes = useCallback(async () => {
     try {
-      const res = await fetch("/api/earthquakes", { cache: "no-store" });
+      const url = !isLive && activeDate ? `/api/earthquakes?date=${activeDate}` : "/api/earthquakes";
+      const res = await fetch(url, { cache: "no-store" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.detail ?? json.error ?? "Unknown error");
       setQuakes(json);
@@ -194,14 +348,83 @@ export default function WeatherGlobe() {
     } catch (err) {
       setQuakesError(err instanceof Error ? err.message : String(err));
     }
+  }, [isLive, activeDate]);
+
+  useEffect(() => {
+    // Debounced: dragging through the timeline shouldn't fire a request per tick.
+    const timeout = setTimeout(loadQuakes, isLive ? 0 : 250);
+    return () => clearTimeout(timeout);
+  }, [loadQuakes, isLive]);
+
+  useEffect(() => {
+    if (!isLive) return; // a specific day's quakes are fixed — no need to poll
+    const interval = setInterval(loadQuakes, REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [loadQuakes, isLive]);
+
+  const loadHurricanes = useCallback(async () => {
+    try {
+      const res = await fetch("/api/hurricanes", { cache: "no-store" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.detail ?? json.error ?? "Unknown error");
+      setHurricanes(json);
+      setHurricanesError(null);
+    } catch (err) {
+      setHurricanesError(err instanceof Error ? err.message : String(err));
+    }
   }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadQuakes();
-    const interval = setInterval(loadQuakes, REFRESH_MS);
+    loadHurricanes();
+    const interval = setInterval(loadHurricanes, REFRESH_MS);
     return () => clearInterval(interval);
-  }, [loadQuakes]);
+  }, [loadHurricanes]);
+
+  // Deep-history (monthly zone): fetch a daily-aggregate weather snapshot for
+  // every city from Open-Meteo's archive (ERA5, back to 1940), debounced and
+  // cached per date so scrubbing back and forth doesn't re-fetch.
+  useEffect(() => {
+    if (activeZone !== "monthly" || !activeDate) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHistorySnapshots(null);
+      return;
+    }
+
+    const cached = historyCacheRef.current.get(activeDate);
+    if (cached) {
+      setHistorySnapshots(cached);
+      setHistoryError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = setTimeout(() => {
+      setHistoryLoading(true);
+      setHistoryError(null);
+
+      fetch(`/api/history?date=${activeDate}`, { cache: "no-store" })
+        .then(async (res) => {
+          const json = await res.json();
+          if (!res.ok) throw new Error(json.detail ?? json.error ?? "Unknown error");
+          if (!cancelled) {
+            historyCacheRef.current.set(activeDate, json.cities);
+            setHistorySnapshots(json.cities);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) setHistoryError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (!cancelled) setHistoryLoading(false);
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [activeZone, activeDate]);
 
   // Wire up pan/zoom once the SVG exists. The map stays mounted (just hidden
   // via CSS) when switching to table view, so this only needs to run once.
@@ -249,24 +472,132 @@ export default function WeatherGlobe() {
 
   const activeMetric = METRICS[metric];
 
+  // What's actually rendered everywhere:
+  //  - monthly zone: a frozen daily-aggregate snapshot from decades back
+  //  - hourly zone (scrubbed): a frozen hour from the past-48h/next-24h window
+  //  - live: current "right now" fields
+  // While a new zone/date's data is still in flight, we fall back to the last
+  // known-good set (via lastGoodCitiesRef below) instead of an empty array —
+  // otherwise the map flashes blank for a beat before the loading blur has
+  // anything to blur, which reads as a glitch rather than a loading state.
+  const effectiveCities = useMemo<CityWeather[]>(() => {
+    if (isLive) return data?.cities ?? lastGoodCities;
+
+    if (activeZone === "monthly") {
+      if (!historySnapshots) return lastGoodCities;
+      return CITIES.map((city) => {
+        const snap = historySnapshots.find((s) => s.id === city.id);
+        return {
+          id: city.id,
+          name: city.name,
+          country: city.country,
+          lat: city.lat,
+          lon: city.lon,
+          temperature: snap?.tempMean ?? NaN,
+          windSpeed: snap?.windMax ?? NaN,
+          precipitation: snap?.precipSum ?? NaN,
+          weatherCode: snap?.weatherCode ?? 0,
+          isDay: true,
+          aqi: NaN,
+          pm25: NaN,
+          hourly: [],
+        };
+      });
+    }
+
+    if (!data) return lastGoodCities;
+    const hourlyIdx = activeIndex - monthlyEntries.length;
+    return data.cities.map((city) => {
+      const point = city.hourly[hourlyIdx];
+      if (!point) return city;
+      return {
+        ...city,
+        temperature: point.temperature,
+        windSpeed: point.windSpeed,
+        precipitation: point.precipitation,
+        weatherCode: point.weatherCode,
+        aqi: point.aqi,
+        pm25: point.pm25,
+        isDay: estimateIsDay(new Date(point.time).getTime(), city.lon),
+      };
+    });
+    // lastGoodCities is intentionally excluded — it's a stale-while-loading
+    // fallback only, and reacting to it would create a render loop (each
+    // fresh non-fallback result gets mirrored back into lastGoodCities by
+    // the effect below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLive, activeZone, activeIndex, monthlyEntries.length, data, historySnapshots]);
+
+  // Mirrors effectiveCities into state right after each render so the memo
+  // above can fall back to "whatever we last had" during a loading gap.
+  // effectiveCities only changes identity when its own deps change (not on
+  // every render), so this doesn't loop.
+  useEffect(() => {
+    if (effectiveCities.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLastGoodCities(effectiveCities);
+    }
+  }, [effectiveCities]);
+
+  // Auto-advance playback through the recent hourly window only — animating
+  // through 80 years of monthly history at 350ms/step wouldn't be watchable,
+  // so play is disabled while the slider sits in the monthly zone (see the
+  // button's `disabled` below).
+  useEffect(() => {
+    if (!isPlaying || timeline.length === 0) return;
+    const interval = setInterval(() => {
+      setScrubIndex((current) => {
+        const currentHourlyIdx = (current ?? liveIndexCombined) - monthlyEntries.length;
+        const next = currentHourlyIdx + 1;
+        const wrapped = next >= timeline.length ? 0 : next;
+        return monthlyEntries.length + wrapped;
+      });
+    }, 350);
+    return () => clearInterval(interval);
+  }, [isPlaying, timeline.length, liveIndexCombined, monthlyEntries.length]);
+
+  function handleScrub(index: number) {
+    setIsPlaying(false);
+    setScrubIndex(index);
+  }
+
+  function jumpToLive() {
+    setIsPlaying(false);
+    setScrubIndex(null);
+  }
+
+  // The date input is a "type to jump" shortcut into the same combined
+  // timeline, rather than a separate mode.
+  function handleDateInputChange(value: string) {
+    if (!value) return;
+    const targetMonth = value.slice(0, 7); // YYYY-MM
+    const monthlyIdx = monthlyEntries.findIndex((e) => e.date.startsWith(targetMonth));
+    if (monthlyIdx >= 0) {
+      handleScrub(monthlyIdx);
+      return;
+    }
+    // Falls within the recent hourly window instead (very recent date).
+    const hourlyIdx = timeline.findIndex((h) => h.time.slice(0, 10) === value);
+    if (hourlyIdx >= 0) handleScrub(monthlyEntries.length + hourlyIdx);
+  }
+
   const colorScale = useMemo(() => {
-    if (!data) return null;
-    const values = data.cities.map(activeMetric.access).filter((v) => !Number.isNaN(v));
+    if (effectiveCities.length === 0) return null;
+    const values = effectiveCities.map(activeMetric.access).filter((v) => !Number.isNaN(v));
     const min = Math.min(...values, activeMetric.fallbackMin);
     const max = Math.max(...values, activeMetric.fallbackMax);
     const domain = activeMetric.reverse ? [max, min] : [min, max];
     return { scale: scaleSequential(activeMetric.interpolator).domain(domain as [number, number]), min, max };
-  }, [data, activeMetric]);
+  }, [effectiveCities, activeMetric]);
 
   const stats = useMemo(() => {
-    if (!data) return null;
-    const valid = data.cities.filter((c) => !Number.isNaN(c.temperature));
+    const valid = effectiveCities.filter((c) => !Number.isNaN(c.temperature));
     if (valid.length === 0) return null;
     const warmest = valid.reduce((a, b) => (a.temperature > b.temperature ? a : b));
     const coldest = valid.reduce((a, b) => (a.temperature < b.temperature ? a : b));
     const avg = valid.reduce((sum, c) => sum + c.temperature, 0) / valid.length;
     return { warmest, coldest, avg };
-  }, [data]);
+  }, [effectiveCities]);
 
   const searchTerm = search.trim().toLowerCase();
   const matches = useCallback(
@@ -278,13 +609,13 @@ export default function WeatherGlobe() {
   );
 
   const filteredCities = useMemo(
-    () => (data ? data.cities.filter(matches) : []),
-    [data, matches]
+    () => effectiveCities.filter(matches),
+    [effectiveCities, matches]
   );
 
   const selectedCity = useMemo(
-    () => (data && selectedId ? data.cities.find((c) => c.id === selectedId) ?? null : null),
-    [data, selectedId]
+    () => (selectedId ? effectiveCities.find((c) => c.id === selectedId) ?? null : null),
+    [effectiveCities, selectedId]
   );
 
   function handleSelect(city: CityWeather) {
@@ -297,7 +628,15 @@ export default function WeatherGlobe() {
     setMouse({ x: e.clientX - rect.left, y: e.clientY - rect.top });
   }
 
-  const ready = landPath && projection && data && colorScale;
+  const ready = landPath && projection && colorScale && effectiveCities.length > 0;
+
+  const selectedHistorySnapshot = useMemo(
+    () =>
+      activeZone === "monthly" && !isLive && selectedCity
+        ? historySnapshots?.find((s) => s.id === selectedCity.id) ?? null
+        : null,
+    [activeZone, isLive, historySnapshots, selectedCity]
+  );
   const legendStops = colorScale
     ? [0, 0.25, 0.5, 0.75, 1].map((t) =>
         colorScale.scale(colorScale.min + t * (colorScale.max - colorScale.min))
@@ -311,12 +650,18 @@ export default function WeatherGlobe() {
       <div
         ref={containerRef}
         onMouseMove={handleMouseMove}
-        className={`absolute inset-0 ${view === "map" ? "" : "invisible"}`}
+        className={`absolute inset-0 transition-[filter] duration-300 ${view === "map" ? "" : "invisible"} ${
+          historyLoading ? "blur-sm" : ""
+        }`}
       >
         <svg
           ref={svgRef}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-          preserveAspectRatio="xMidYMid slice"
+          // "meet" (not "slice") scales the whole 960x500 world map to fit
+          // entirely inside whatever the container's aspect ratio is,
+          // letterboxing instead of cropping — so the whole earth is always
+          // visible, even on a narrow/tall mobile viewport.
+          preserveAspectRatio="xMidYMid meet"
           className="h-full w-full block touch-none"
         >
           <defs>
@@ -367,7 +712,58 @@ export default function WeatherGlobe() {
                   );
                 })}
 
-              {data!.cities.map((city) => {
+              {/* Active storms — live-only (NHC has no free historical-date
+                  API like USGS does for quakes), so these only render while
+                  following live data, regardless of scrubber position. */}
+              {showHurricanes &&
+                isLive &&
+                hurricanes?.storms.map((storm) => {
+                  const coords = projection!([storm.lon, storm.lat]);
+                  if (!coords) return null;
+                  const [x, y] = coords;
+                  const color = hurricaneColor(storm.classification, storm.category);
+                  const radius = 6 + (storm.category ?? 0) * 1.6;
+
+                  return (
+                    <g
+                      key={storm.id}
+                      transform={`translate(${x}, ${y})`}
+                      onMouseEnter={() => setHoveredHurricane(storm)}
+                      onMouseLeave={() => setHoveredHurricane((h) => (h?.id === storm.id ? null : h))}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <g transform={`scale(${1 / mapTransform.k})`}>
+                        <circle
+                          r={radius * 1.9}
+                          fill={color}
+                          opacity={0.2}
+                          className="orb-pulse"
+                          style={{ ["--pulse-duration" as string]: "2.2s" }}
+                        />
+                        {storm.movementDir !== null && (
+                          // Rotated clockwise from north to match meteorological
+                          // movementDir convention — the base shape points "up"
+                          // (north) at rotate(0).
+                          <g transform={`rotate(${storm.movementDir})`}>
+                            <line x1={0} y1={-radius - 2} x2={0} y2={-radius - 12} stroke={color} strokeWidth={1.5} />
+                            <path d={`M0,${-radius - 14} L-3,${-radius - 9} L3,${-radius - 9} Z`} fill={color} />
+                          </g>
+                        )}
+                        <circle r={radius} fill={color} stroke="#fff" strokeOpacity={0.6} strokeWidth={1} />
+                        <Tornado
+                          x={-radius * 0.6}
+                          y={-radius * 0.6}
+                          width={radius * 1.2}
+                          height={radius * 1.2}
+                          color="#0f172a"
+                          strokeWidth={2.5}
+                        />
+                      </g>
+                    </g>
+                  );
+                })}
+
+              {effectiveCities.map((city) => {
                 const coords = projection!([city.lon, city.lat]);
                 if (!coords) return null;
                 const [x, y] = coords;
@@ -455,13 +851,11 @@ export default function WeatherGlobe() {
             </div>
             <div className="mt-1 grid grid-cols-2 gap-x-2 text-slate-400">
               <span>Temp</span>
-              <span className="text-slate-100">
-                {Number.isNaN(hovered.temperature) ? "—" : `${hovered.temperature.toFixed(1)}°C`}
-              </span>
+              <span className="text-slate-100">{formatTemperature(hovered.temperature, units)}</span>
               <span>Wind</span>
-              <span className="text-slate-100">{hovered.windSpeed.toFixed(0)} km/h</span>
+              <span className="text-slate-100">{formatWind(hovered.windSpeed, units)}</span>
               <span>Precip</span>
-              <span className="text-slate-100">{hovered.precipitation.toFixed(1)} mm</span>
+              <span className="text-slate-100">{formatPrecip(hovered.precipitation, units)}</span>
               <span>Air quality</span>
               <span className="text-slate-100">{Number.isNaN(hovered.aqi) ? "—" : `${hovered.aqi.toFixed(0)} AQI`}</span>
               <span>Local</span>
@@ -480,9 +874,45 @@ export default function WeatherGlobe() {
             <div className="text-slate-300">{hoveredQuake.place}</div>
             <div className="mt-1 grid grid-cols-2 gap-x-2 text-slate-400">
               <span>Depth</span>
-              <span className="text-slate-100">{hoveredQuake.depthKm.toFixed(0)} km</span>
+              <span className="text-slate-100">{formatDistance(hoveredQuake.depthKm, units)}</span>
               <span>When</span>
-              <span className="text-slate-100">{timeAgo(hoveredQuake.time)}</span>
+              <span className="text-slate-100">
+                {/* "5m ago" only reads right for the live feed — once we're
+                    scrubbed into history, "ago" relative to real-world now
+                    produces nonsense like "24564d ago", so show the actual
+                    date instead. */}
+                {isLive ? formatRelativeTime(hoveredQuake.time) : formatAbsoluteDateTime(hoveredQuake.time)}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {view === "map" && !hovered && !hoveredQuake && hoveredHurricane && (
+          <div
+            className="pointer-events-none absolute z-20 max-w-[220px] rounded-lg border border-slate-700 bg-slate-950/95 px-3 py-2 text-xs text-slate-100 shadow-xl backdrop-blur-md"
+            style={{ left: mouse.x + 14, top: mouse.y + 14 }}
+          >
+            <div className="font-semibold">
+              {hoveredHurricane.kind} {hoveredHurricane.name}
+            </div>
+            <div className="text-slate-300">
+              {hoveredHurricane.category ? `Category ${hoveredHurricane.category}` : hoveredHurricane.kind}
+            </div>
+            <div className="mt-1 grid grid-cols-2 gap-x-2 text-slate-400">
+              <span>Max wind</span>
+              <span className="text-slate-100">{formatWindFromMph(hoveredHurricane.windMph, units)}</span>
+              <span>Pressure</span>
+              <span className="text-slate-100">
+                {hoveredHurricane.pressureMb === null ? "—" : `${hoveredHurricane.pressureMb} mb`}
+              </span>
+              <span>Movement</span>
+              <span className="text-slate-100">
+                {hoveredHurricane.movementSpeedMph === null
+                  ? "—"
+                  : formatWindFromMph(hoveredHurricane.movementSpeedMph, units)}
+              </span>
+              <span>Updated</span>
+              <span className="text-slate-100">{formatRelativeTime(hoveredHurricane.lastUpdate)}</span>
             </div>
           </div>
         )}
@@ -490,8 +920,12 @@ export default function WeatherGlobe() {
 
       {/* Table view: floats above the (hidden) map as a full overlay panel. */}
       {view === "table" && (
-        <div className="absolute inset-x-4 bottom-4 top-28 z-30 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/95 p-3 backdrop-blur sm:inset-x-8 sm:top-32">
-          <CityTable cities={filteredCities} selectedId={selectedId} onSelect={handleSelect} />
+        <div
+          className={`absolute inset-x-4 bottom-20 top-28 z-30 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/95 p-3 backdrop-blur transition-[filter] duration-300 sm:inset-x-8 sm:top-32 ${
+            historyLoading ? "blur-sm" : ""
+          }`}
+        >
+          <CityTable cities={filteredCities} selectedId={selectedId} onSelect={handleSelect} units={units} />
         </div>
       )}
 
@@ -506,19 +940,19 @@ export default function WeatherGlobe() {
             {stats ? (
               <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1">
                 <Flame size={12} className="text-orange-400" />
-                {stats.warmest.name} {stats.warmest.temperature.toFixed(1)}°C
+                {stats.warmest.name} {formatTemperature(stats.warmest.temperature, units)}
                 <span className="text-slate-600">·</span>
                 <Snowflake size={12} className="text-sky-400" />
-                {stats.coldest.name} {stats.coldest.temperature.toFixed(1)}°C
+                {stats.coldest.name} {formatTemperature(stats.coldest.temperature, units)}
                 <span className="text-slate-600">·</span>
-                Avg {stats.avg.toFixed(1)}°C
+                Avg {formatTemperature(stats.avg, units)}
               </span>
             ) : (
               <span>Loading live weather…</span>
             )}
           </div>
           <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-500">
-            {data && <span>Updated {new Date(data.fetchedAt).toLocaleTimeString()}</span>}
+            {data && <span>Updated {formatTimeOnly(data.fetchedAt)}</span>}
             <button
               onClick={loadWeather}
               className="pointer-events-auto flex items-center gap-1 rounded-full border border-slate-600 px-2 py-0.5 text-slate-200 hover:bg-slate-800 transition-colors"
@@ -567,6 +1001,16 @@ export default function WeatherGlobe() {
           </div>
 
           <button
+            onClick={() => setUnits((u) => (u === "metric" ? "imperial" : "metric"))}
+            title="Switch units"
+            aria-label={`Switch to ${units === "metric" ? "imperial" : "metric"} units`}
+            className="flex items-center gap-1.5 rounded-full border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 transition-colors"
+          >
+            <Thermometer size={12} />
+            {units === "metric" ? "°C · km/h · mm" : "°F · mph · in"}
+          </button>
+
+          <button
             onClick={() => setShowQuakes((v) => !v)}
             title={quakesError ? `Couldn't load earthquakes: ${quakesError}` : undefined}
             className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors ${
@@ -578,20 +1022,47 @@ export default function WeatherGlobe() {
             <Activity size={13} />
             Quakes{quakes ? ` (${quakes.quakes.length})` : ""}
           </button>
+
+          <button
+            onClick={() => setShowHurricanes((v) => !v)}
+            title={
+              hurricanesError
+                ? `Couldn't load storms: ${hurricanesError}`
+                : !isLive
+                  ? "Storms are live-only — jump to Now to see them"
+                  : undefined
+            }
+            className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors ${
+              showHurricanes
+                ? "border-cyan-600/60 bg-cyan-500/20 text-cyan-200"
+                : "border-slate-700 text-slate-300 hover:bg-slate-800"
+            }`}
+          >
+            <Tornado size={13} />
+            Storms{hurricanes ? ` (${hurricanes.storms.length})` : ""}
+          </button>
         </div>
       </div>
 
       {error && (
         <div className="pointer-events-none absolute left-1/2 top-24 z-40 w-full max-w-md -translate-x-1/2 px-4">
-          <div className="pointer-events-auto rounded-md border border-red-800 bg-red-950/90 px-3 py-2 text-center text-sm text-red-300 backdrop-blur">
-            Couldn&apos;t reach Open-Meteo: {error}
+          <div
+            className={`pointer-events-auto rounded-md border px-3 py-2 text-center text-sm backdrop-blur ${
+              isRateLimited(error)
+                ? "border-amber-800 bg-amber-950/90 text-amber-200"
+                : "border-red-800 bg-red-950/90 text-red-300"
+            }`}
+          >
+            {isRateLimited(error)
+              ? "Rate limited by Open-Meteo — still showing the last data we loaded."
+              : `Couldn't reach Open-Meteo: ${error}`}
           </div>
         </div>
       )}
 
       {view === "map" && (
         <>
-          <div className="pointer-events-auto absolute right-3 bottom-3 z-30 flex flex-col gap-1">
+          <div className="pointer-events-auto absolute right-3 bottom-20 z-30 flex flex-col gap-1">
             <button
               onClick={() => zoomBy(1.5)}
               aria-label="Zoom in"
@@ -615,19 +1086,27 @@ export default function WeatherGlobe() {
             </button>
           </div>
 
-          <div className="pointer-events-none absolute bottom-3 left-3 z-30 flex flex-col gap-2">
+          <div className="pointer-events-none absolute bottom-20 left-3 z-30 flex flex-col gap-2">
             {colorScale && (
               <div className="rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-2 text-[10px] text-slate-300">
                 <div className="mb-1">
-                  {activeMetric.label} ({activeMetric.unit})
+                  {activeMetric.label} ({activeMetric.unit(units)})
                 </div>
                 <div
                   className="h-2 w-32 rounded-full"
                   style={{ background: `linear-gradient(to right, ${legendStops.join(", ")})` }}
                 />
                 <div className="mt-0.5 flex justify-between">
-                  <span>{colorScale.min.toFixed(0)}</span>
-                  <span>{colorScale.max.toFixed(0)}</span>
+                  <span>
+                    {activeMetric.unitsMetric
+                      ? convertMetricValue(activeMetric.unitsMetric, colorScale.min, units).toFixed(0)
+                      : colorScale.min.toFixed(0)}
+                  </span>
+                  <span>
+                    {activeMetric.unitsMetric
+                      ? convertMetricValue(activeMetric.unitsMetric, colorScale.max, units).toFixed(0)
+                      : colorScale.max.toFixed(0)}
+                  </span>
                 </div>
               </div>
             )}
@@ -636,7 +1115,7 @@ export default function WeatherGlobe() {
               <div className="rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-2 text-[10px] text-slate-300">
                 <div className="mb-1 flex items-center gap-1.5">
                   <Activity size={11} />
-                  M4.5+ earthquakes (24h)
+                  M4.5+ earthquakes ({isLive ? "24h" : "this day"})
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="flex items-center gap-1">
@@ -650,13 +1129,202 @@ export default function WeatherGlobe() {
                 </div>
               </div>
             )}
+
+            {showHurricanes && isLive && (
+              <div className="rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-2 text-[10px] text-slate-300">
+                <div className="mb-1 flex items-center gap-1.5">
+                  <Tornado size={11} />
+                  Active storms (live only)
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="flex items-center gap-1">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ background: hurricaneColor("TS", null) }}
+                    />
+                    Storm
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ background: hurricaneColor("HU", 1) }}
+                    />
+                    Cat 1-2
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ background: hurricaneColor("HU", 5) }}
+                    />
+                    Cat 4-5
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}
 
       {selectedCity && (
-        <div className="absolute right-4 top-28 bottom-4 z-40 w-[340px] max-w-[90vw] overflow-y-auto sm:top-32">
-          <DetailPanel city={selectedCity} onClose={() => setSelectedId(null)} />
+        <div
+          className={`absolute right-4 top-28 bottom-20 z-40 w-[340px] max-w-[90vw] overflow-y-auto transition-[filter] duration-300 sm:top-32 ${
+            historyLoading ? "blur-sm" : ""
+          }`}
+        >
+          <DetailPanel
+            city={selectedCity}
+            onClose={() => setSelectedId(null)}
+            historySnapshot={selectedHistorySnapshot}
+            units={units}
+          />
+        </div>
+      )}
+
+      {/* Time-scrubber: one slider spanning 1940 -> now. Monthly resolution
+          for deep history, hourly resolution for the recent 48h/next 24h. */}
+      {combinedLength > 0 && (
+        <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-40 flex items-center gap-3 border-t border-slate-800 bg-slate-950/90 px-4 py-2.5 backdrop-blur">
+          <button
+            onClick={() => setIsPlaying((p) => !p)}
+            disabled={activeZone === "monthly"}
+            aria-label={isPlaying ? "Pause playback" : "Play through the recent window"}
+            title={activeZone === "monthly" ? "Jump into the recent window to play" : undefined}
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-slate-200 ${
+              activeZone === "monthly"
+                ? "cursor-not-allowed border-slate-800 text-slate-700"
+                : "border-slate-700 bg-slate-900/90 hover:bg-slate-800"
+            }`}
+          >
+            {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+          </button>
+
+          <div className="flex w-32 shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-slate-300">
+            <History size={12} className={isLive ? "text-emerald-400" : "text-amber-400"} />
+            {isLive ? (
+              <span className="font-medium text-emerald-400">Live</span>
+            ) : activeZone === "monthly" ? (
+              historyLoading ? (
+                "Loading…"
+              ) : activeDate ? (
+                formatMonthYear(activeDate)
+              ) : (
+                ""
+              )
+            ) : (
+              formatScrubTime(timeline[activeIndex - monthlyEntries.length]?.time ?? "")
+            )}
+          </div>
+
+          <div className="relative flex-1">
+            <input
+              type="range"
+              min={0}
+              max={combinedLength - 1}
+              step={1}
+              value={activeIndex}
+              onChange={(e) => handleScrub(Number(e.target.value))}
+              className="relative z-10 w-full accent-sky-400"
+              aria-label="Scrub through time, 1940 to now"
+            />
+            {/* Tick marks underneath: decade/5-year ticks across the deep
+                monthly history, day/6h ticks across the recent hourly
+                window, plus a standalone "now" marker — click any to jump. */}
+            <div className="pointer-events-none relative mt-0.5 h-6">
+              {monthlyEntries.map((entry, i) => {
+                if (i % 60 !== 0) return null; // every 5 years
+                const isDecade = i % 240 === 0; // every 20 years
+                const pct = (i / (combinedLength - 1)) * 100;
+                return (
+                  <button
+                    key={entry.date}
+                    onClick={() => handleScrub(i)}
+                    aria-label={`Jump to ${entry.date.slice(0, 4)}`}
+                    title={entry.date.slice(0, 4)}
+                    style={{ left: `${pct}%` }}
+                    className="pointer-events-auto absolute top-0 flex -translate-x-1/2 flex-col items-center gap-0.5 text-slate-600 hover:text-slate-300"
+                  >
+                    <span className={isDecade ? "h-2 w-[2px] bg-current" : "h-1 w-px bg-current"} />
+                    {isDecade && <span className="text-[9px] leading-none">{entry.date.slice(0, 4)}</span>}
+                  </button>
+                );
+              })}
+
+              {timeline.map((point, i) => {
+                if (i % 6 !== 0) return null;
+                const isDayBoundary = i % 24 === 0;
+                const globalIndex = monthlyEntries.length + i;
+                const pct = (globalIndex / (combinedLength - 1)) * 100;
+                return (
+                  <button
+                    key={point.time}
+                    onClick={() => handleScrub(globalIndex)}
+                    aria-label={`Jump to ${formatScrubTime(point.time)}`}
+                    title={formatScrubTime(point.time)}
+                    style={{ left: `${pct}%` }}
+                    className="pointer-events-auto absolute top-0 flex -translate-x-1/2 flex-col items-center gap-0.5 text-slate-600 hover:text-slate-300"
+                  >
+                    <span className={isDayBoundary ? "h-2 w-[2px] bg-current" : "h-1 w-px bg-current"} />
+                    {isDayBoundary && (
+                      <span className="text-[9px] leading-none whitespace-nowrap">
+                        {formatWeekday(point.time)}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+
+              {liveIndexCombined >= 0 && (
+                <button
+                  onClick={jumpToLive}
+                  aria-label="Jump to now"
+                  title="Now"
+                  style={{ left: `${(liveIndexCombined / (combinedLength - 1)) * 100}%` }}
+                  className="pointer-events-auto absolute top-0 flex -translate-x-1/2 flex-col items-center gap-0.5 text-emerald-500 hover:text-emerald-400"
+                >
+                  <span className="h-2.5 w-[2px] bg-current" />
+                  <span className="text-[9px] leading-none">Now</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <input
+            type="date"
+            min="1940-01-01"
+            max={monthlyEntries[monthlyEntries.length - 1]?.date}
+            value={!isLive && activeZone === "monthly" ? activeDate ?? "" : ""}
+            onChange={(e) => handleDateInputChange(e.target.value)}
+            aria-label="Jump to a date"
+            className="shrink-0 rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 [color-scheme:dark] focus:outline-none focus:ring-1 focus:ring-slate-500"
+          />
+
+          <button
+            onClick={jumpToLive}
+            disabled={isLive}
+            className={`shrink-0 rounded-full border px-3 py-1 text-xs transition-colors ${
+              isLive
+                ? "cursor-default border-slate-800 text-slate-600"
+                : "border-slate-600 text-slate-200 hover:bg-slate-800"
+            }`}
+          >
+            Now
+          </button>
+        </div>
+      )}
+
+      {historyError && activeZone === "monthly" && !isLive && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-14 z-40 flex justify-center px-4">
+          <div
+            className={`pointer-events-auto rounded-md border px-3 py-1.5 text-xs backdrop-blur ${
+              isRateLimited(historyError)
+                ? "border-amber-800 bg-amber-950/90 text-amber-200"
+                : "border-red-800 bg-red-950/90 text-red-300"
+            }`}
+          >
+            {isRateLimited(historyError)
+              ? "Rate limited — showing the last date that loaded successfully. Try again shortly."
+              : `Couldn't load that date: ${historyError}`}
+          </div>
         </div>
       )}
     </div>

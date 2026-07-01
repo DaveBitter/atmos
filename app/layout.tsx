@@ -4,7 +4,7 @@ import "./globals.css";
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
 const TITLE = "Atmos — check in on earth once in a while";
 const DESCRIPTION =
-  "Check in on earth once in a while — a live, playful weather visualization of cities around the world, powered by Open-Meteo.";
+  "A live, playful visualization of weather, air quality, and earthquakes around the world — plus a time-scrubber that goes back to 1940. Powered by Open-Meteo and USGS.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),

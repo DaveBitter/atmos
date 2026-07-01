@@ -5,6 +5,7 @@ import { ChevronUp, ChevronDown } from "lucide-react";
 import type { CityWeather } from "@/app/api/weather/route";
 import { describeWeather } from "@/lib/weatherCodes";
 import { describeAqi } from "@/lib/airQuality";
+import { type UnitSystem, formatTemperature, formatWind, formatPrecip } from "@/lib/units";
 
 type SortKey = "name" | "temperature" | "windSpeed" | "precipitation" | "aqi";
 
@@ -20,10 +21,12 @@ export default function CityTable({
   cities,
   selectedId,
   onSelect,
+  units,
 }: {
   cities: CityWeather[];
   selectedId: string | null;
   onSelect: (city: CityWeather) => void;
+  units: UnitSystem;
 }) {
   const [sortKey, setSortKey] = useState<SortKey>("temperature");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -92,11 +95,9 @@ export default function CityTable({
                 <td className="px-3 py-2 text-slate-100">
                   {city.name} <span className="text-slate-500">{city.country}</span>
                 </td>
-                <td className="px-3 py-2 text-slate-200">
-                  {Number.isNaN(city.temperature) ? "—" : `${city.temperature.toFixed(1)}°C`}
-                </td>
-                <td className="px-3 py-2 text-slate-200">{city.windSpeed.toFixed(0)} km/h</td>
-                <td className="px-3 py-2 text-slate-200">{city.precipitation.toFixed(1)} mm</td>
+                <td className="px-3 py-2 text-slate-200">{formatTemperature(city.temperature, units)}</td>
+                <td className="px-3 py-2 text-slate-200">{formatWind(city.windSpeed, units)}</td>
+                <td className="px-3 py-2 text-slate-200">{formatPrecip(city.precipitation, units)}</td>
                 <td className="px-3 py-2 text-slate-200">
                   {Number.isNaN(city.aqi) ? (
                     "—"
