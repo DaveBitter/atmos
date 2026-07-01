@@ -23,6 +23,9 @@ import {
   History,
   Thermometer,
   Tornado,
+  SlidersHorizontal,
+  Layers,
+  X,
 } from "lucide-react";
 import type { CityWeather } from "@/app/api/weather/route";
 import type { Earthquake } from "@/app/api/earthquakes/route";
@@ -244,6 +247,11 @@ export default function WeatherGlobe() {
   const [units, setUnits] = useState<UnitSystem>("metric");
   const [view, setView] = useState<View>("map");
   const [search, setSearch] = useState("");
+  // Both panels are collapsed behind a toggle button on mobile (see the
+  // md:flex overrides below) so the map gets real screen space instead of
+  // being squeezed into a sliver by stacked full-width controls.
+  const [showControlsPanel, setShowControlsPanel] = useState(false);
+  const [showLegendPanel, setShowLegendPanel] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mapTransform, setMapTransform] = useState(IDENTITY_TRANSFORM);
   const [quakes, setQuakes] = useState<EarthquakeResponse | null>(null);
@@ -567,18 +575,50 @@ export default function WeatherGlobe() {
   }
 
   // The date input is a "type to jump" shortcut into the same combined
-  // timeline, rather than a separate mode.
+  // timeline, rather than a separate mode. It's a native <input type="date">
+  // so the browser lets people pick any DAY, even though the deep-history
+  // side of the timeline only actually samples the 1st of each month — any
+  // other day in a covered month still resolves fine via the startsWith
+  // check below. The one real gap is the handful of days between the last
+  // monthly sample and the start of the recent hourly window (a date in
+  // "the current month, but not yet in the last 48h") — without handling
+  // that explicitly, picking one of those days silently did nothing, which
+  // read as the picker being broken.
   function handleDateInputChange(value: string) {
     if (!value) return;
+
     const targetMonth = value.slice(0, 7); // YYYY-MM
     const monthlyIdx = monthlyEntries.findIndex((e) => e.date.startsWith(targetMonth));
     if (monthlyIdx >= 0) {
       handleScrub(monthlyIdx);
       return;
     }
-    // Falls within the recent hourly window instead (very recent date).
+
+    // Exact day within the recent hourly window.
     const hourlyIdx = timeline.findIndex((h) => h.time.slice(0, 10) === value);
-    if (hourlyIdx >= 0) handleScrub(monthlyEntries.length + hourlyIdx);
+    if (hourlyIdx >= 0) {
+      handleScrub(monthlyEntries.length + hourlyIdx);
+      return;
+    }
+
+    // Picked a day that falls in the gap between the two zones — snap to
+    // whichever edge is chronologically closer instead of doing nothing.
+    const pickedMs = new Date(`${value}T00:00:00Z`).getTime();
+    const lastMonthly = monthlyEntries[monthlyEntries.length - 1];
+    const firstHourly = timeline[0];
+    if (!lastMonthly || !firstHourly) return;
+
+    const lastMonthlyMs = new Date(`${lastMonthly.date}T00:00:00Z`).getTime();
+    const firstHourlyMs = new Date(firstHourly.time).getTime();
+    if (pickedMs <= lastMonthlyMs) {
+      handleScrub(monthlyEntries.length - 1);
+    } else if (pickedMs >= firstHourlyMs) {
+      handleScrub(monthlyEntries.length);
+    } else {
+      const distToMonthly = pickedMs - lastMonthlyMs;
+      const distToHourly = firstHourlyMs - pickedMs;
+      handleScrub(distToMonthly <= distToHourly ? monthlyEntries.length - 1 : monthlyEntries.length);
+    }
   }
 
   const colorScale = useMemo(() => {
@@ -932,10 +972,23 @@ export default function WeatherGlobe() {
       {/* Top overlay bar: title/stats on the left, controls on the right. */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-40 flex flex-col gap-2 p-4 md:flex-row md:items-start md:justify-between">
         <div className="pointer-events-auto max-w-md rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-3 backdrop-blur">
-          <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-slate-100">
-            <Globe size={20} className="text-sky-400" />
-            Atmos — check in on earth once in a while
-          </h1>
+          <div className="flex items-start justify-between gap-3">
+            <h1 className="flex items-center gap-2 text-base font-semibold tracking-tight text-slate-100 md:text-lg">
+              <Globe size={20} className="shrink-0 text-sky-400" />
+              Atmos — check in on earth once in a while
+            </h1>
+            {/* Controls live behind this button on small screens so the map
+                gets real space instead of being squeezed by stacked
+                full-width panels — see showControlsPanel below. */}
+            <button
+              onClick={() => setShowControlsPanel((v) => !v)}
+              aria-label={showControlsPanel ? "Hide controls" : "Show controls"}
+              aria-expanded={showControlsPanel}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-slate-700 text-slate-200 hover:bg-slate-800 md:hidden"
+            >
+              {showControlsPanel ? <X size={14} /> : <SlidersHorizontal size={14} />}
+            </button>
+          </div>
           <div className="mt-1 text-xs text-slate-400">
             {stats ? (
               <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1">
@@ -963,7 +1016,9 @@ export default function WeatherGlobe() {
           </div>
         </div>
 
-        <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 backdrop-blur">
+        <div
+          className={`${showControlsPanel ? "flex" : "hidden"} pointer-events-auto max-w-full flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 backdrop-blur md:flex`}
+        >
           <div className="flex items-center gap-1 rounded-full border border-slate-700 p-1">
             {(Object.keys(METRICS) as Metric[]).map((key) => (
               <button
@@ -1087,6 +1142,18 @@ export default function WeatherGlobe() {
           </div>
 
           <div className="pointer-events-none absolute bottom-20 left-3 z-30 flex flex-col gap-2">
+            {/* Legend boxes are collapsed behind this button on mobile —
+                same reasoning as the top controls panel. */}
+            <button
+              onClick={() => setShowLegendPanel((v) => !v)}
+              aria-label={showLegendPanel ? "Hide legend" : "Show legend"}
+              aria-expanded={showLegendPanel}
+              className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-900/90 text-slate-200 hover:bg-slate-800 md:hidden"
+            >
+              {showLegendPanel ? <X size={14} /> : <Layers size={14} />}
+            </button>
+
+            <div className={`${showLegendPanel ? "flex" : "hidden"} flex-col gap-2 md:flex`}>
             {colorScale && (
               <div className="rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-2 text-[10px] text-slate-300">
                 <div className="mb-1">
@@ -1161,6 +1228,7 @@ export default function WeatherGlobe() {
                 </div>
               </div>
             )}
+            </div>
           </div>
         </>
       )}
@@ -1183,13 +1251,13 @@ export default function WeatherGlobe() {
       {/* Time-scrubber: one slider spanning 1940 -> now. Monthly resolution
           for deep history, hourly resolution for the recent 48h/next 24h. */}
       {combinedLength > 0 && (
-        <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-40 flex items-center gap-3 border-t border-slate-800 bg-slate-950/90 px-4 py-2.5 backdrop-blur">
+        <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-40 flex flex-wrap items-center gap-2 border-t border-slate-800 bg-slate-950/90 px-3 py-2.5 backdrop-blur sm:gap-3 sm:px-4">
           <button
             onClick={() => setIsPlaying((p) => !p)}
             disabled={activeZone === "monthly"}
             aria-label={isPlaying ? "Pause playback" : "Play through the recent window"}
             title={activeZone === "monthly" ? "Jump into the recent window to play" : undefined}
-            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-slate-200 ${
+            className={`order-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-slate-200 ${
               activeZone === "monthly"
                 ? "cursor-not-allowed border-slate-800 text-slate-700"
                 : "border-slate-700 bg-slate-900/90 hover:bg-slate-800"
@@ -1198,8 +1266,8 @@ export default function WeatherGlobe() {
             {isPlaying ? <Pause size={14} /> : <Play size={14} />}
           </button>
 
-          <div className="flex w-32 shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-slate-300">
-            <History size={12} className={isLive ? "text-emerald-400" : "text-amber-400"} />
+          <div className="order-2 flex min-w-0 flex-1 items-center gap-1.5 truncate text-xs text-slate-300 sm:w-32 sm:flex-none">
+            <History size={12} className={`shrink-0 ${isLive ? "text-emerald-400" : "text-amber-400"}`} />
             {isLive ? (
               <span className="font-medium text-emerald-400">Live</span>
             ) : activeZone === "monthly" ? (
@@ -1215,7 +1283,23 @@ export default function WeatherGlobe() {
             )}
           </div>
 
-          <div className="relative flex-1">
+          {/* Moved up in DOM order so it naturally lands in the first row on
+              mobile (see the flex-wrap + order classes here); sm:order-5
+              puts it back at the far right on desktop, matching the
+              original single-row layout. */}
+          <button
+            onClick={jumpToLive}
+            disabled={isLive}
+            className={`order-3 shrink-0 rounded-full border px-3 py-1 text-xs transition-colors sm:order-5 ${
+              isLive
+                ? "cursor-default border-slate-800 text-slate-600"
+                : "border-slate-600 text-slate-200 hover:bg-slate-800"
+            }`}
+          >
+            Now
+          </button>
+
+          <div className="relative order-4 w-full sm:order-3 sm:w-auto sm:flex-1">
             <input
               type="range"
               min={0}
@@ -1291,24 +1375,17 @@ export default function WeatherGlobe() {
           <input
             type="date"
             min="1940-01-01"
-            max={monthlyEntries[monthlyEntries.length - 1]?.date}
-            value={!isLive && activeZone === "monthly" ? activeDate ?? "" : ""}
+            // Previously capped at the last deep-history sample, which
+            // meant the browser silently rejected picking any of the last
+            // ~3 recent days — the whole "jump to a recent day" path was
+            // unreachable. The true latest pickable day is the end of the
+            // hourly window (tomorrow), not the last monthly sample.
+            max={timeline[timeline.length - 1]?.time.slice(0, 10) ?? monthlyEntries[monthlyEntries.length - 1]?.date}
+            value={!isLive ? activeDate ?? "" : ""}
             onChange={(e) => handleDateInputChange(e.target.value)}
             aria-label="Jump to a date"
-            className="shrink-0 rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 [color-scheme:dark] focus:outline-none focus:ring-1 focus:ring-slate-500"
+            className="order-5 w-full rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 [color-scheme:dark] focus:outline-none focus:ring-1 focus:ring-slate-500 sm:order-4 sm:w-auto sm:shrink-0"
           />
-
-          <button
-            onClick={jumpToLive}
-            disabled={isLive}
-            className={`shrink-0 rounded-full border px-3 py-1 text-xs transition-colors ${
-              isLive
-                ? "cursor-default border-slate-800 text-slate-600"
-                : "border-slate-600 text-slate-200 hover:bg-slate-800"
-            }`}
-          >
-            Now
-          </button>
         </div>
       )}
 
