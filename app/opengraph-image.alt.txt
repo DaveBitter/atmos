@@ -1,0 +1,1 @@
+Atmos — a full-screen live weather globe showing city temperatures as glowing orbs, active earthquakes, and tropical storms overlaid on a world map, with a time-scrubber for browsing history back to 1940.
