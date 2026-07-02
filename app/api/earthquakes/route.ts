@@ -97,11 +97,23 @@ export async function GET(req: Request) {
       quakes = parseFeed((await res.json()) as UsgsFeed);
     }
 
-    return NextResponse.json({
-      fetchedAt: new Date().toISOString(),
-      date,
-      quakes,
-    });
+    return NextResponse.json(
+      {
+        fetchedAt: new Date().toISOString(),
+        date,
+        quakes,
+      },
+      {
+        // Historical (date given) is immutable; live is short-lived — same
+        // reasoning as elsewhere, this lets the CDN absorb repeat requests
+        // instead of every one reaching this function.
+        headers: {
+          "Cache-Control": date
+            ? "public, s-maxage=31536000, immutable"
+            : "public, s-maxage=300, stale-while-revalidate=60",
+        },
+      }
+    );
   } catch (err) {
     return NextResponse.json(
       {

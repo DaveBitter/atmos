@@ -83,7 +83,16 @@ export async function GET(req: Request) {
       });
     });
 
-    return NextResponse.json({ date, cities });
+    return NextResponse.json(
+      { date, cities },
+      {
+        // A fixed past date's daily aggregate never changes — safe to let
+        // Netlify's CDN cache this indefinitely, so a burst of requests for
+        // the same historical date (deliberate or not) never re-invokes
+        // this function after the first one.
+        headers: { "Cache-Control": "public, s-maxage=31536000, immutable" },
+      }
+    );
   } catch (err) {
     return NextResponse.json(
       {

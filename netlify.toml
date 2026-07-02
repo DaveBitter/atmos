@@ -1,0 +1,33 @@
+# Netlify rate limiting (code-based rules, available on all plans — see
+# https://docs.netlify.com/manage/security/secure-access-to-sites/rate-limiting/).
+# These are self-redirects purely to attach a rate_limit block; they don't
+# change routing. Free/Starter plans allow 2 rules per project, so this is
+# split into one broad rule covering every API route and one tighter rule
+# for the deep-history endpoint specifically, since that's the one that can
+# fan out into thousands of distinct, genuinely-uncached upstream requests
+# if someone scripts a scrape across the full 1940-present date range.
+
+[[redirects]]
+  from = "/api/*"
+  to = "/api/:splat"
+  status = 200
+  force = true
+  [redirects.rate_limit]
+    # 100 requests per IP per minute across all API routes.
+    window_limit = 100
+    window_size = 60
+    aggregate_by = ["ip", "domain"]
+
+[[redirects]]
+  from = "/api/history*"
+  to = "/api/history:splat"
+  status = 200
+  force = true
+  [redirects.rate_limit]
+    # Tighter limit on the deep-history endpoint: each distinct date is a
+    # real, uncached-on-first-hit call to Open-Meteo's archive API for every
+    # city, so this is the cheapest path to rack up a lot of upstream calls
+    # fast. 20/min per IP still lets someone drag the slider around freely.
+    window_limit = 20
+    window_size = 60
+    aggregate_by = ["ip", "domain"]

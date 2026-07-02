@@ -176,10 +176,19 @@ export async function GET() {
       };
     });
 
-    return NextResponse.json({
-      fetchedAt: new Date().toISOString(),
-      cities,
-    });
+    return NextResponse.json(
+      {
+        fetchedAt: new Date().toISOString(),
+        cities,
+      },
+      {
+        // Lets Netlify's edge CDN serve repeat requests within the window
+        // without re-invoking this function at all — the main defense
+        // against a traffic spike (legitimate or not) driving up function
+        // invocations, on top of the upstream-fetch caching above.
+        headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60" },
+      }
+    );
   } catch (err) {
     return NextResponse.json(
       {

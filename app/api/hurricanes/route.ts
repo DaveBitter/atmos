@@ -102,7 +102,10 @@ export async function GET() {
       })
       .filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lon));
 
-    return NextResponse.json({ fetchedAt: new Date().toISOString(), storms });
+    return NextResponse.json(
+      { fetchedAt: new Date().toISOString(), storms },
+      { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60" } }
+    );
   } catch (err) {
     return NextResponse.json(
       {

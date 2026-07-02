@@ -53,7 +53,9 @@ export async function GET(
     const hours = upcoming.slice(0, HOURS_AHEAD);
 
     const forecast: HourlyForecast = { cityId: id, hours };
-    return NextResponse.json(forecast);
+    return NextResponse.json(forecast, {
+      headers: { "Cache-Control": "public, s-maxage=900, stale-while-revalidate=120" },
+    });
   } catch (err) {
     return NextResponse.json(
       {
